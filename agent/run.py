@@ -1,13 +1,15 @@
 """Запуск звеньев. Пример: python3 -m agent.run collect   (или: novelty, filter, details, flags, evaluate,
-select, deliver, inbox, letters, all)
+select, deliver, inbox, letters, track, all)
+
+`all` — ежедневный запуск: сначала нажатия и письма по вчерашней подборке, потом новая подборка и учёт.
 
 Каждое звено читает выход предыдущего из data/runs/<сегодня>/ и пишет свой.
 """
 import json
 import sys
-from datetime import date
+from datetime import date, datetime
 
-from . import assess, digest, letter, links, telegram
+from . import assess, digest, letter, links, telegram, tracker
 from .common import DATA, load_config, load_step, save_step
 
 
@@ -138,18 +140,49 @@ def step_letters(cfg):
     print(f"Звено 9 — письма: готово {sum(1 for v in todo if decisions[v].get('letter'))} из {len(todo)}, токенов {tokens}")
 
 
+def step_track(cfg):
+    """Звено 10. Учёт в data/tracker.csv: отправленные сегодня вакансии и решения по кнопкам."""
+    try:
+        sel, sent = load_step("07_select")["selected"], set(load_step("08_deliver")["sent"])
+        sent_vacancies = [v for v in sel if v["id"] in sent]
+    except FileNotFoundError:  # подборки сегодня не было — обновляем только решения
+        sent_vacancies = []
+    p = DATA / "decisions.json"
+    decisions = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    try:
+        res = tracker.update(sent_vacancies, decisions, letter.find_vacancy)
+    except PermissionError:
+        print("Звено 10 — учёт: таблица открыта в Excel, обновлю при следующем запуске")
+        return
+    print(f"Звено 10 — учёт: добавлено {res['added']}, изменён статус у {res['changed']}, всего строк {res['total']}")
+
+
 STEPS = {"inbox": step_inbox, "letters": step_letters, "collect": step_collect, "novelty": step_novelty, "filter": step_filter,
          "details": step_details, "flags": step_flags, "evaluate": step_evaluate, "select": step_select,
-         "deliver": step_deliver}
+         "deliver": step_deliver, "track": step_track}
+OPTIONAL = {"inbox", "letters", "track"}  # их сбой не должен лишать подборки
 
 
 def main():
     cfg = load_config()
     names = sys.argv[1:] or ["all"]
-    if names == ["all"]:
+    daily = names == ["all"]
+    if daily:
         names = list(STEPS)
+        print(f"=== Запуск {datetime.now():%d.%m.%Y %H:%M} ===")
     for n in names:
-        STEPS[n](cfg)
+        try:
+            STEPS[n](cfg)
+        except Exception as e:
+            print(f"!!! Звено «{n}» упало: {type(e).__name__}: {e}")
+            if daily:  # при запуске по расписанию — сообщить в Telegram, раз никто не смотрит в консоль
+                try:
+                    telegram.send(f"⚠️ Агент поиска работы: сбой на шаге «{n}»\n{telegram.esc(type(e).__name__)}: "
+                                  f"{telegram.esc(str(e)[:300])}")
+                except Exception:
+                    pass
+            if n not in OPTIONAL:
+                sys.exit(1)
 
 
 if __name__ == "__main__":
