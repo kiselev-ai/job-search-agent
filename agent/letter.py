@@ -16,10 +16,11 @@ RULES = """Помоги составить сопроводительное пи
 {projects}
 
 Ответь ТОЛЬКО JSON без ```:
-{{"task": "...", "projects": ["id", ...], "answers": "...", "energy": true/false, "people": true/false}}
+{{"task": "...", "tools": ["...", ...], "projects": ["id", ...], "answers": "...", "energy": true/false, "people": true/false}}
 
-- task — главная (или первая названная) задача работы из текста вакансии, ближе всего похожая на проекты кандидата: именная группа в именительном падеже, 5–15 слов, со строчной буквы, без точки — она встанет во фразу «Ваша задача — <task> — по устройству похожа на то, что я уже делал». Пример: «ИИ-агент, который собирает актуальные темы из источников и готовит подборки для команды». Это не название должности, а то, что нужно сделать (обязанность, лучше с её целью). Сохраняй написание слов как в вакансии (AI, ИИ, Python). Только содержание вакансии, ничего о кандидате;
-- projects — 1–2 id проектов, ближайших к задачам вакансии, самый близкий первым;
+- task — главная (или первая названная) задача работы из текста вакансии, ближе всего похожая на проекты кандидата: именная группа в именительном падеже, 5–15 слов, со строчной буквы, без точки — она встанет во фразу «Главное в ней — <task>.». Пример: «ИИ-агент, который собирает актуальные темы из источников и готовит подборки для команды». Это не название должности, а то, что нужно сделать (обязанность, лучше с её целью). Пиши суть задачи, НЕ называя конкретных программ, сервисов и языков (не «в n8n и LangFlow», а «автоматизации бизнес-процессов с помощью LLM»). Сохраняй написание слов как в вакансии (AI, ИИ). Только содержание вакансии, ничего о кандидате;
+- tools — конкретные программы, сервисы, платформы и языки, которые вакансия называет для этой задачи или в обязательных требованиях (n8n, LangFlow, Go, 1С, Bitrix24…), до 5 штук, написание как в вакансии; если не названы — [];
+- projects — 1–2 id проектов, ближайших к задачам вакансии, самый близкий первым (проект vl добавят сами, его можно не указывать);
 - answers — если в вакансии просят что-то указать или ответить в отклике (кроме ссылок на GitHub/портфолио — их добавят сами), кратко ответь только фактами из профиля; иначе пустая строка;
 - energy — true, только если вакансия прямо или косвенно связана с электроэнергетикой (энергокомпания, электросети, ЖКХ, промышленное оборудование);
 - people — true, если в работе нужно внедрять решения у сотрудников, общаться с ними, обучать.
@@ -42,6 +43,21 @@ def _restore_case(phrase, source):
         if any(c.isupper() for c in w[1:]) or (w[:1].isupper() and re.match(r"[A-Za-z]", w)):
             forms.setdefault(w.lower(), w)
     return re.sub(r"\w+", lambda m: forms.get(m.group(0).lower(), m.group(0)) if m.group(0).islower() else m.group(0), phrase)
+
+
+def _new_tools(tools, blocks):
+    """Инструменты вакансии, которых нет среди знакомых кандидату (known_tools в letter_blocks.json)."""
+    known = {k.lower() for k in blocks.get("known_tools", [])}
+    out = []
+    for t in tools or []:
+        t = str(t).strip()
+        if t and t.lower() not in known and t.lower() not in {o.lower() for o in out}:
+            out.append(t)
+    return out[:4]
+
+
+def _join(items):
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " и " + items[-1]
 
 
 def _blocks():
@@ -91,6 +107,12 @@ def write(v, model, cfg, profile=None):
     for attempt in range(2):
         d, projects, raw, tokens = _plan(messages, model, blocks)
         used += tokens
+        named = [t for t in d.get("tools") or [] if str(t).strip() and str(t).lower() in d["task"].lower()]
+        if named and attempt == 0:  # программы должны быть в tools, а не во вступлении — один повтор
+            messages = messages + [{"role": "assistant", "content": raw},
+                                   {"role": "user", "content": f"В task названы программы ({', '.join(named)}). "
+                                    "Перепиши task по сути задачи, без названий программ; остальное оставь. Верни JSON."}]
+            continue
         answers = (d.get("answers") or "").strip()
         if not answers:
             issues = []
@@ -103,6 +125,10 @@ def write(v, model, cfg, profile=None):
                                {"role": "user", "content": "В ответах есть утверждения, которых нет в профиле:\n- "
                                 + "\n- ".join(issues) + "\nИсправь, верни JSON по той же схеме."}]
 
+    lead = blocks.get("lead_project")  # главный проект — всегда первым, остальные — по выбору GigaChat
+    if lead in blocks["projects"]:
+        projects = [lead] + [p for p in projects if p != lead]
+    projects = projects[:blocks.get("max_projects", 3)]
     about = blocks["method"]
     if d.get("energy"):
         about += " " + blocks["energy"]
@@ -111,13 +137,17 @@ def write(v, model, cfg, profile=None):
     task = _restore_case(d["task"].strip().rstrip("."), f"{v['title']}\n{v['description']}")
     if task[1:2].islower():  # «Создание…» → «создание…», но «AI-агент» не трогаем
         task = task[:1].lower() + task[1:]
-    opening = f"Ваша задача — {task} — по устройству похожа на то, что я уже делал."
-    parts = ["Здравствуйте!", opening, " ".join(blocks["projects"][p]["text"] for p in projects), about]
+    opening = blocks["intro"].format(title=v["title"].strip(), task=task)
+    new = _new_tools(d.get("tools"), blocks)
+    if new:  # честно назвать инструменты вакансии, с которыми кандидат не работал
+        opening += " " + blocks["new_tools"].format(tools=_join(new))
+    opening += " " + blocks["intro_end"]
+    numbered = "\n\n".join(f"{i}. {blocks['projects'][p]['text']}" for i, p in enumerate(projects, 1))
+    parts = ["Здравствуйте!", opening, numbered, about]
     if answers:
         parts.append(answers)
-    parts.append(blocks["closing"])
     if cfg.get("portfolio_url"):
-        parts.append(f"Проекты и код: {cfg['portfolio_url']}")
+        parts.append(blocks["closing"].format(portfolio=cfg["portfolio_url"]))
     parts.append(cfg.get("letter_signature", ""))
     return "\n\n".join(p for p in parts if p), issues, used
 

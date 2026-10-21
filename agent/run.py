@@ -1,5 +1,5 @@
 """Запуск звеньев. Пример: python3 -m agent.run collect   (или: novelty, filter, details, flags, evaluate,
-select, deliver, inbox, letters, track, all)
+select, deliver, inbox, letters, track, all, quick)
 
 `all` — ежедневный запуск: сначала нажатия и письма по вчерашней подборке, потом новая подборка и учёт.
 
@@ -103,7 +103,7 @@ def step_deliver(cfg):
 
 
 def step_inbox(cfg):
-    """Нажатия кнопок с прошлой подборки → data/decisions.json (для писем и учёта)."""
+    """Нажатия кнопок с прошлой подборки → data/decisions.json (для писем и учёта). Возвращает число нажатий."""
     presses = telegram.collect_presses()
     p = DATA / "decisions.json"
     decisions = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
@@ -112,6 +112,7 @@ def step_inbox(cfg):
     p.write_text(json.dumps(decisions, ensure_ascii=False, indent=1), encoding="utf-8")
     likes = sum(a == "like" for _, a in presses)
     print(f"Входящие: нажатий {len(presses)} (интересно {likes}, не надо {len(presses) - likes})")
+    return len(presses)
 
 
 def step_letters(cfg):
@@ -163,9 +164,35 @@ STEPS = {"inbox": step_inbox, "letters": step_letters, "collect": step_collect, 
 OPTIONAL = {"inbox", "letters", "track"}  # их сбой не должен лишать подборки
 
 
+def quick(cfg):
+    """Частая проверка (каждые 10 минут): забрать нажатия и сразу сделать письма.
+    Telegram хранит нажатия недолго, поэтому раз в сутки забирать их ненадёжно.
+    Если нажатий нет — ничего не пишет, чтобы не засорять журнал."""
+    import contextlib, io
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            n = step_inbox(cfg)
+    except Exception as e:  # нет сети и т. п. — попробуем через 10 минут
+        print(f"{datetime.now():%H:%M} проверка нажатий не удалась: {type(e).__name__}: {e}")
+        return
+    if not n:
+        return
+    print(f"=== Проверка нажатий {datetime.now():%d.%m.%Y %H:%M} ===")
+    print(buf.getvalue(), end="")
+    for step in (step_letters, step_track):
+        try:
+            step(cfg)
+        except Exception as e:
+            print(f"!!! {step.__name__} упало: {type(e).__name__}: {e}")
+
+
 def main():
     cfg = load_config()
     names = sys.argv[1:] or ["all"]
+    if names == ["quick"]:
+        quick(cfg)
+        return
     daily = names == ["all"]
     if daily:
         names = list(STEPS)

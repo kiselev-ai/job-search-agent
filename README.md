@@ -63,6 +63,7 @@ python3 -m agent.run collect filter  # или отдельные звенья
 Звенья по порядку: `inbox letters collect novelty filter details flags evaluate select deliver track`. Выходы — в `data/runs/<дата>/`.
 
 Ежедневный запуск — `run_daily.sh` через планировщик macOS (launchd) раз в день (сейчас в 19:00): ждёт появления сети после пробуждения, пишет лог по дням, о сбое сообщает в Telegram.
+Нажатия кнопок забирает `run_daily.sh quick` каждые 10 минут (второе задание launchd): письмо приходит через несколько минут после «Интересно».
 
 ## Структура
 

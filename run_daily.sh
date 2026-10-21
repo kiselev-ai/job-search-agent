@@ -9,9 +9,13 @@ if [ $# -eq 0 ] && [ -f "data/runs/$(date +%Y-%m-%d)/08_deliver.json" ]; then
   echo "$(date '+%d.%m.%Y %H:%M') — подборка за сегодня уже отправлена, запуск пропущен" >> "$LOG"
   exit 0
 fi
-# После пробуждения Mac сеть появляется не сразу — ждём до 2 минут
+# После пробуждения Mac сеть появляется не сразу — ждём до 2 минут (частой проверке ждать незачем)
+[ "$1" = "quick" ] || \
 for i in $(seq 1 24); do
   /usr/bin/curl -s -o /dev/null --max-time 5 https://hh.ru && break
   sleep 5
 done
-/usr/bin/python3 -u -m agent.run "${@:-all}" >> "$LOG" 2>&1
+# Блокировка: частая проверка нажатий и полный запуск не должны забирать одни и те же нажатия одновременно.
+# Частая проверка при занятой блокировке просто пропускается, полный запуск ждёт до 10 минут.
+if [ "$1" = "quick" ]; then WAIT=0; else WAIT=600; fi
+/usr/bin/lockf -s -t "$WAIT" data/.lock /usr/bin/python3 -u -m agent.run "${@:-all}" >> "$LOG" 2>&1
